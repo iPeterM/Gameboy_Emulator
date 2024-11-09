@@ -370,13 +370,12 @@ void render_graphics(const CPU &cpu, Graphics &graphics) {
 
     // Raylib rendering (draw scaled pixels)
     for (int y = 0; y < SCREEN_HEIGHT; ++y) {
-    for (int x = 0; x < SCREEN_WIDTH; ++x) {
-        // Use the framebuffer to scale up the pixels for display
-        unsigned char color_value = graphics.framebuffer[y * SCREEN_WIDTH + x]; // Use unsigned char instead of int
-        DrawPixel(x * SCALE, y * SCALE, Color{color_value, color_value, color_value, 255});
+        for (int x = 0; x < SCREEN_WIDTH; ++x) {
+            // Use the framebuffer to scale up the pixels for display
+            unsigned char color_value = graphics.framebuffer[y * SCREEN_WIDTH + x]; // Use unsigned char instead of int
+            DrawPixel(x * SCALE, y * SCALE, Color{color_value, color_value, color_value, 255});
+        }
     }
-}
-
 }
 
 // Game loop (simplified)
@@ -384,24 +383,33 @@ void game_loop(CPU &cpu, MBCType mbc_type) {
     Graphics graphics;
     initialize_cpu(cpu);
 
+    InitWindow(SCREEN_WIDTH * SCALE, SCREEN_HEIGHT * SCALE, "CoolBoy Emulator");
+
     while (!WindowShouldClose()) {
         // Handle input and interrupts
         handle_interrupts(cpu);
 
-        // Execute CPU cycles (in a real emulator, each opcode should take time)
+        // Execute CPU cycles (simplified for demonstration)
         execute_opcode(cpu);
-
-        // Update timer
-        cpu.timer_counter++;
 
         // Render graphics
         render_graphics(cpu, graphics);
 
-        // Update window
         BeginDrawing();
-        ClearBackground(RAYWHITE);
+        ClearBackground(BLACK);
+
+        // Draw the framebuffer to the screen
+        for (int y = 0; y < SCREEN_HEIGHT; ++y) {
+            for (int x = 0; x < SCREEN_WIDTH; ++x) {
+                unsigned char color_value = graphics.framebuffer[y * SCREEN_WIDTH + x];
+                DrawPixel(x * SCALE, y * SCALE, Color{color_value, color_value, color_value, 255});
+            }
+        }
+
         EndDrawing();
     }
+
+    CloseWindow();
 }
 
 int main() {
