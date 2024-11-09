@@ -1,168 +1,354 @@
 #include <iostream>
+#include <fstream>
+#include <string>
+#include <cstdint>
+#include <cstring>
 #include <vector>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdbool.h>
-#include <string.h>
+#include <chrono>
+#include <raylib.h>  // For graphical rendering
 
-#define MEMORY_SIZE 0x10000 // Game Boy has 64KB of addressable memory
-#define ROM_BANK_SIZE 0x4000 // 16KB ROM bank size
-#define VRAM_SIZE 0x2000     // 8KB for VRAM
-#define EXTERNAL_RAM_SIZE 0x2000 // 8KB for external RAM
-#define OAM_SIZE 0xA0        // 160 bytes for Sprite OAM
-#define HRAM_SIZE 0x7F       // 127 bytes for HRAM
-#define IORAM_SIZE 0x80      // 128 bytes for I/O Registers
+using namespace std;
 
-// CPU structure with registers and flags
+#define SCREEN_WIDTH 160
+#define SCREEN_HEIGHT 144
+#define SCALE 4
+#define MEMORY_SIZE 0x10000
+#define ROM_SIZE 0x8000
+#define MAX_ROM_BANKS 128
+#define MAX_RAM_BANKS 4
+
+// CPU structure
 struct CPU {
-    uint8_t A, F; // Accumulator & Flags
-    uint8_t B, C; // General-purpose
-    uint8_t D, E; // General-purpose
-    uint8_t H, L; // General-purpose
-    uint16_t PC;  // Program Counter
-    uint16_t SP;  // Stack Pointer
-    bool halt;    // Halt state
-
-    CPU() : A(0x01), F(0xB0), B(0x00), C(0x13), D(0x00), E(0xD8), H(0x01), L(0x4D), PC(0x0100), SP(0xFFFE), halt(false) {}
+    uint8_t memory[MEMORY_SIZE]; // 64KB memory space (Game Boy)
+    uint16_t pc;                 // Program Counter
+    uint16_t sp;                 // Stack Pointer
+    uint8_t a, b, c, d, e, h, l; // Registers
+    uint8_t zf, nf, hf, cf;      // Flags
+    uint8_t ie;                  // Interrupt Enable Register
+    uint8_t iflags;              // Interrupt Flags Register
+    uint8_t timer_counter;       // Timer Counter Register
+    uint8_t timer_divider;       // Timer Divider Register
+    uint8_t timer_modulo;        // Timer Modulo Register
+    uint8_t timer_control;       // Timer Control Register
+    uint8_t selected_bank;       // Currently selected ROM bank
+    uint8_t selected_ram_bank;   // Currently selected RAM bank
 };
 
-// Memory bank information (MBC1)
-struct MBC1 {
-    uint8_t ram_enable;   // RAM enable flag
-    uint8_t ram_bank;     // Selected RAM bank (MBC1 only)
-    uint8_t rom_bank_low; // Lower 5 bits of the selected ROM bank
-    uint8_t rom_bank_high; // Upper 2 bits of the selected ROM bank
-
-    MBC1() : ram_enable(0), ram_bank(0), rom_bank_low(1), rom_bank_high(0) {}
+// ROM header structure
+struct ROMHeader {
+    char title[16];
+    uint8_t cartridge_type;
+    uint8_t rom_size;
+    uint8_t ram_size;
+    uint8_t destination_code;
+    uint8_t old_licensee_code;
+    uint8_t mask_rom_version;
+    uint8_t header_checksum;
+    uint8_t global_checksum[2];
 };
 
-// Global objects
-std::vector<uint8_t> memory(MEMORY_SIZE); // Game Boy memory
-CPU cpu; // CPU instance
-MBC1 mbc1; // MBC1 controller instance
-std::vector<std::vector<uint8_t>> rom_banks(2); // ROM bank storage
-uint32_t cpu_cycles = 0; // Variable to track CPU cycles
+// Define the types of Memory Bank Controllers (MBC)
+enum class MBCType {
+    NONE = 0,
+    MBC1,
+    MBC2,
+    MBC3,
+    MBC5
+};
 
-// Function to initialize MBC1 memory controller
-void initialize_mbc1() {
-    mbc1.ram_enable = 0;
-    mbc1.ram_bank = 0;
-    mbc1.rom_bank_low = 1; // Start with ROM bank 1
-    mbc1.rom_bank_high = 0; // Start with ROM bank high bits 0
+// Graphics structure (simplified)
+struct Graphics {
+    uint8_t framebuffer[SCREEN_WIDTH * SCREEN_HEIGHT];  // Pixel data
+};
+
+// Initialize the CPU and memory
+void initialize_cpu(CPU &cpu) {
+    memset(cpu.memory, 0, MEMORY_SIZE);
+    cpu.pc = 0x0100;  // ROM execution starts at 0x0100
+    cpu.sp = 0xFFFE;  // Stack starts at 0xFFFE
+    cpu.ie = 0;       // Interrupt enable register
+    cpu.iflags = 0;   // Interrupt flags
+    cpu.timer_counter = 0;
+    cpu.timer_divider = 0;
+    cpu.timer_modulo = 0;
+    cpu.timer_control = 0;
+    cpu.selected_bank = 1; // Default to first ROM bank
+    cpu.selected_ram_bank = 0; // Default to first RAM bank
 }
 
-// Function to load ROM into memory
-int load_rom(const char* filename) {
-    FILE* file = fopen(filename, "rb");
-    if (!file) {
-        std::cerr << "Error: Could not open ROM file " << filename << std::endl;
-        return -1;
+// Load the ROM into memory
+bool load_rom(CPU &cpu, const string &filename, MBCType &mbc_type) {
+    ifstream rom_file(filename, ios::binary);
+    if (!rom_file.is_open()) {
+        cerr << "Failed to open ROM file." << endl;
+        return false;
     }
 
-    fseek(file, 0, SEEK_END);
-    long rom_size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-
-    // Calculate total ROM banks and load ROM data
-    int total_rom_banks = (rom_size + ROM_BANK_SIZE - 1) / ROM_BANK_SIZE;
-    rom_banks.resize(total_rom_banks);
-
-    for (int i = 0; i < total_rom_banks; i++) {
-        rom_banks[i].resize(ROM_BANK_SIZE);
-        fread(rom_banks[i].data(), 1, ROM_BANK_SIZE, file);
+    // Read the ROM header
+    ROMHeader header;
+    rom_file.read(reinterpret_cast<char*>(&header), sizeof(ROMHeader));
+    if (!rom_file) {
+        cerr << "Failed to read ROM header." << endl;
+        return false;
     }
-    fclose(file);
 
-    std::cout << "ROM loaded successfully. Size: " << rom_size << " bytes" << std::endl;
+    // Store ROM title
+    cout << "ROM Title: ";
+    for (int i = 0; i < 16; ++i) {
+        if (header.title[i] != 0) {
+            cout << header.title[i];
+        }
+    }
+    cout << endl;
+
+    // Determine the MBC type based on the cartridge type field
+    switch (header.cartridge_type) {
+        case 0x00: mbc_type = MBCType::NONE; break;
+        case 0x01: mbc_type = MBCType::MBC1; break;
+        case 0x02: mbc_type = MBCType::MBC2; break;
+        case 0x03: mbc_type = MBCType::MBC3; break;
+        case 0x05: mbc_type = MBCType::MBC5; break;
+        default: mbc_type = MBCType::NONE; break;
+    }
+
+    // Load ROM into memory (starting at 0x0100)
+    rom_file.seekg(0x0100);
+    rom_file.read(reinterpret_cast<char*>(&cpu.memory[0x0100]), ROM_SIZE);
+
+    return true;
+}
+
+// MBC1 - Memory Bank Controller 1 functions
+void handle_mbc1(CPU &cpu, uint8_t opcode) {
+    // MBC1-specific functionality, handling bank switching
+    switch (opcode) {
+        case 0x0A:  // Example: Bank switch operation (simplified)
+            cpu.selected_bank = cpu.memory[0x2000];  // Just a simple example
+            break;
+        default:
+            break;
+    }
+}
+
+// MBC2 - Memory Bank Controller 2 functions
+void handle_mbc2(CPU &cpu, uint8_t opcode) {
+    // MBC2-specific functionality
+    // MBC2 typically handles 512KB ROMs, and simple RAM handling
+    switch (opcode) {
+        case 0x0A:  // Example: Bank switch operation for MBC2
+            cpu.selected_bank = cpu.memory[0x2000];
+            break;
+        default:
+            break;
+    }
+}
+
+// MBC3 - Memory Bank Controller 3 functions (with RTC support)
+void handle_mbc3(CPU &cpu, uint8_t opcode) {
+    // MBC3-specific functionality, handles up to 64KB RAM and RTC
+    switch (opcode) {
+        case 0x0A:  // Example: Bank switch operation for MBC3
+            cpu.selected_bank = cpu.memory[0x2000];
+            break;
+        default:
+            break;
+    }
+}
+
+// MBC5 - Memory Bank Controller 5 functions
+void handle_mbc5(CPU &cpu, uint8_t opcode) {
+    // MBC5-specific functionality, 32KB RAM and up to 2MB ROM
+    switch (opcode) {
+        case 0x0A:  // Example: Bank switch operation for MBC5
+            cpu.selected_bank = cpu.memory[0x2000];
+            break;
+        default:
+            break;
+    }
+}
+
+// Memory Access - based on selected ROM bank
+uint8_t read_memory(CPU &cpu, uint16_t address) {
+    if (address < 0x8000) {
+        return cpu.memory[address]; // Read ROM directly
+    }
+    else if (address >= 0x8000 && address < 0xA000) {
+        // Handle ROM bank switching based on MBC type
+        switch (cpu.selected_bank) {
+            case 1: // Example: Handle MBC1
+                handle_mbc1(cpu, cpu.memory[address]);
+                break;
+            case 2: // Example: Handle MBC2
+                handle_mbc2(cpu, cpu.memory[address]);
+                break;
+            case 3: // Example: Handle MBC3
+                handle_mbc3(cpu, cpu.memory[address]);
+                break;
+            case 4: // Example: Handle MBC5
+                handle_mbc5(cpu, cpu.memory[address]);
+                break;
+            default:
+                break;
+        }
+        return cpu.memory[address]; // Simplified memory access
+    }
+    return cpu.memory[address];
+}
+
+// Simple opcode handler (for demonstration, needs more opcodes)
+void execute_opcode(CPU &cpu) {
+    uint8_t opcode = cpu.memory[cpu.pc++];
+    // A simplified version: just a couple of opcodes for demonstration
+    switch (opcode) {
+        case 0x00:  // NOP (No operation)
+            break;
+        case 0x01:  // LD BC, nn (Load 16-bit immediate into BC)
+            cpu.b = cpu.memory[cpu.pc++];
+            cpu.c = cpu.memory[cpu.pc++];
+            break;
+        case 0x02:  // LD (BC), A (Store A into BC memory)
+            cpu.memory[(cpu.b << 8) | cpu.c] = cpu.a;
+            break;
+        // Add more opcodes as needed
+        default:
+            cerr << "Unhandled opcode: 0x" << hex << (int)opcode << endl;
+            break;
+    }
+}
+
+// Handle interrupts (for demonstration)
+void handle_interrupts(CPU &cpu) {
+    if (cpu.iflags & 0x01) {
+        // Handle V-Blank interrupt
+        cpu.iflags &= ~0x01;  // Clear interrupt flag
+    }
+    if (cpu.iflags & 0x02) {
+        // Handle Timer interrupt
+        cpu.iflags &= ~0x02;  // Clear interrupt flag
+    }
+}
+
+// Graphics rendering (simplified, using Raylib)
+void render_graphics(const CPU &cpu, Graphics &graphics) {
+    // Clear framebuffer (set all pixels to 0)
+    memset(graphics.framebuffer, 0, sizeof(graphics.framebuffer));
+
+    // Handle background tiles (assuming tilemap is at 0x9800)
+    for (int tile_y = 0; tile_y < 18; ++tile_y) {  // 18 tiles vertically (144 / 8)
+        for (int tile_x = 0; tile_x < 20; ++tile_x) { // 20 tiles horizontally (160 / 8)
+            uint16_t tile_index = cpu.memory[0x9800 + (tile_y * 32) + tile_x];  // Tile map points to VRAM tile index
+
+            // Get tile data (8x8 pixels)
+            for (int y = 0; y < 8; ++y) {
+                uint8_t tile_data_low = cpu.memory[0x8000 + (tile_index * 16) + y * 2];   // Low byte of tile data
+                uint8_t tile_data_high = cpu.memory[0x8000 + (tile_index * 16) + y * 2 + 1]; // High byte of tile data
+
+                // Each bit represents a pixel in the tile row (0 or 1)
+                for (int x = 0; x < 8; ++x) {
+                    bool pixel = ((tile_data_low >> (7 - x)) & 1) | (((tile_data_high >> (7 - x)) & 1) << 1);
+                    int screen_x = tile_x * 8 + x;
+                    int screen_y = tile_y * 8 + y;
+
+                    // Ensure within bounds
+                    if (screen_x < SCREEN_WIDTH && screen_y < SCREEN_HEIGHT) {
+                        graphics.framebuffer[screen_y * SCREEN_WIDTH + screen_x] = pixel * 255; // Set to white or black
+                    }
+                }
+            }
+        }
+    }
+
+    // Handle sprites (OAM at 0xFE00 - 0xFE9F)
+    for (int i = 0; i < 40; ++i) {  // Up to 40 sprites
+        uint8_t sprite_y = cpu.memory[0xFE00 + i * 4]; // Y position
+        uint8_t sprite_x = cpu.memory[0xFE00 + i * 4 + 1]; // X position
+        uint8_t sprite_tile = cpu.memory[0xFE00 + i * 4 + 2]; // Tile index
+        uint8_t sprite_attributes = cpu.memory[0xFE00 + i * 4 + 3]; // Attributes (flip, priority, etc.)
+
+        if (sprite_y >= 0 && sprite_y < SCREEN_HEIGHT && sprite_x >= 0 && sprite_x < SCREEN_WIDTH) {
+            // Extract sprite flipping and other attributes
+            bool flip_x = sprite_attributes & 0x20;
+            bool flip_y = sprite_attributes & 0x40;
+
+            // Get the sprite tile data (8x8 or 8x16)
+            for (int y = 0; y < 8; ++y) {
+                uint8_t tile_data_low = cpu.memory[0x8000 + (sprite_tile * 16) + y * 2];
+                uint8_t tile_data_high = cpu.memory[0x8000 + (sprite_tile * 16) + y * 2 + 1];
+
+                for (int x = 0; x < 8; ++x) {
+                    // Flip the sprite horizontally or vertically if necessary
+                    int sprite_x_flip = flip_x ? 7 - x : x;
+                    int sprite_y_flip = flip_y ? 7 - y : y;
+
+                    bool pixel = ((tile_data_low >> (7 - sprite_x_flip)) & 1) | (((tile_data_high >> (7 - sprite_x_flip)) & 1) << 1);
+                    int screen_x = sprite_x + sprite_x_flip;
+                    int screen_y = sprite_y + sprite_y_flip;
+
+                    // Ensure within bounds and set pixel
+                    if (screen_x < SCREEN_WIDTH && screen_y < SCREEN_HEIGHT) {
+                        graphics.framebuffer[screen_y * SCREEN_WIDTH + screen_x] = pixel * 255;  // Set to white or black
+                    }
+                }
+            }
+        }
+    }
+
+    // Raylib rendering (draw scaled pixels)
+    for (int y = 0; y < SCREEN_HEIGHT; ++y) {
+    for (int x = 0; x < SCREEN_WIDTH; ++x) {
+        // Use the framebuffer to scale up the pixels for display
+        unsigned char color_value = graphics.framebuffer[y * SCREEN_WIDTH + x]; // Use unsigned char instead of int
+        DrawPixel(x * SCALE, y * SCALE, Color{color_value, color_value, color_value, 255});
+    }
+}
+
+}
+
+// Game loop (simplified)
+void game_loop(CPU &cpu, MBCType mbc_type) {
+    Graphics graphics;
+    initialize_cpu(cpu);
+
+    while (!WindowShouldClose()) {
+        // Handle input and interrupts
+        handle_interrupts(cpu);
+
+        // Execute CPU cycles (in a real emulator, each opcode should take time)
+        execute_opcode(cpu);
+
+        // Update timer
+        cpu.timer_counter++;
+
+        // Render graphics
+        render_graphics(cpu, graphics);
+
+        // Update window
+        BeginDrawing();
+        ClearBackground(RAYWHITE);
+        EndDrawing();
+    }
+}
+
+int main() {
+    // Initialize Raylib window
+    InitWindow(SCREEN_WIDTH * SCALE, SCREEN_HEIGHT * SCALE, "Game Boy Emulator");
+    SetTargetFPS(60);
+
+    CPU cpu;
+    MBCType mbc_type = MBCType::NONE;
+
+    // Load ROM and handle errors
+    if (!load_rom(cpu, "game.gb", mbc_type)) {
+        cerr << "Error loading ROM!" << endl;
+        return 1;
+    }
+
+    // Start the game loop
+    game_loop(cpu, mbc_type);
+
+    // Close window and clean up
+    CloseWindow();
+
     return 0;
 }
 
-// Memory read function considering MBC1
-uint8_t read_mbc1_memory(uint16_t address) {
-    if (address < 0x4000) {
-        return rom_banks[0][address]; // Fixed ROM bank (Bank 0)
-    } else if (address < 0x8000) {
-        uint32_t rom_bank_address = (mbc1.rom_bank_high << 14) | (mbc1.rom_bank_low << 13) | (address - 0x4000);
-        return rom_banks[1][rom_bank_address % ROM_BANK_SIZE]; // Switchable ROM bank
-    }
-
-    // Handle RAM (0xA000-0xBFFF)
-    if (mbc1.ram_enable && address >= 0xA000 && address < 0xC000) {
-        uint32_t ram_bank_address = (mbc1.ram_bank * EXTERNAL_RAM_SIZE) + (address - 0xA000);
-        return memory[ram_bank_address];
-    }
-
-    return 0xFF; // Unmapped memory region
-}
-
-// Memory write function considering MBC1
-void write_mbc1_memory(uint16_t address, uint8_t value) {
-    if (address < 0x2000) {
-        mbc1.ram_enable = (value & 0x0A) == 0x0A ? 1 : 0;
-    } else if (address < 0x4000) {
-        mbc1.rom_bank_low = value & 0x1F;
-    } else if (address < 0x6000) {
-        mbc1.rom_bank_high = value & 0x03;
-    } else if (address < 0x8000) {
-        mbc1.ram_bank = value & 0x03; // Select RAM bank (if applicable)
-    }
-}
-
-// Memory read function considering memory mapping
-uint8_t read_memory(uint16_t address) {
-    return read_mbc1_memory(address); // Handle MBC1 memory reading
-}
-
-// Memory write function considering memory mapping
-void write_memory(uint16_t address, uint8_t value) {
-    write_mbc1_memory(address, value); // Handle MBC1 memory writing
-}
-
-// Fetch the next opcode from memory
-uint8_t fetch_opcode() {
-    return read_memory(cpu.PC++); // Increment PC after fetching the opcode
-}
-
-// Test CPU loop to fetch and decode opcodes
-void cpu_test_loop() {
-    while (cpu.PC < MEMORY_SIZE && !cpu.halt) {
-        uint8_t opcode = fetch_opcode();
-        printf("PC: 0x%04X, Opcode: 0x%02X\n", cpu.PC - 1, opcode);
-
-        switch (opcode) {
-            case 0x00: // NOP (No operation)
-                cpu_cycles += 4;
-                break;
-
-            case 0x06: // LD B, n (Load immediate value into B)
-                cpu.B = read_memory(cpu.PC++);
-                cpu_cycles += 8;
-                break;
-
-            // Add other opcodes here as needed...
-            
-            default:
-                std::cout << "Unhandled opcode: 0x" << std::hex << (int)opcode << std::dec << std::endl;
-                break;
-        }
-    }
-}
-
-// Main function to run the emulator
-int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <romfile>" << std::endl;
-        return EXIT_FAILURE;
-    }
-
-    if (load_rom(argv[1]) != 0) {
-        return EXIT_FAILURE;
-    }
-
-    initialize_mbc1(); // Initialize MBC1 memory controller
-    cpu_test_loop(); // Start the CPU test loop
-
-    // Cleanup is handled automatically by std::vector
-    return EXIT_SUCCESS;
-}
