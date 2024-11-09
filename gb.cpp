@@ -196,9 +196,9 @@ uint8_t read_memory(CPU &cpu, uint16_t address) {
 }
 
 // Simple opcode handler (for demonstration, needs more opcodes)
+
 void execute_opcode(CPU &cpu) {
     uint8_t opcode = cpu.memory[cpu.pc++];
-    // A simplified version: just a couple of opcodes for demonstration
     switch (opcode) {
         case 0x00:  // NOP (No operation)
             break;
@@ -209,12 +209,87 @@ void execute_opcode(CPU &cpu) {
         case 0x02:  // LD (BC), A (Store A into BC memory)
             cpu.memory[(cpu.b << 8) | cpu.c] = cpu.a;
             break;
+        case 0x03:  // INC BC (Increment BC)
+            cpu.c++;
+            if (cpu.c == 0) cpu.b++;
+            break;
+        case 0x04:  // INC B (Increment B)
+            cpu.b++;
+            cpu.zf = (cpu.b == 0);
+            cpu.nf = 0;
+            cpu.hf = ((cpu.b & 0x0F) == 0);
+            break;
+        case 0x05:  // DEC B (Decrement B)
+            cpu.b--;
+            cpu.zf = (cpu.b == 0);
+            cpu.nf = 1;
+            cpu.hf = ((cpu.b & 0x0F) == 0x0F);
+            break;
+        case 0x06:  // LD B, n (Load 8-bit immediate into B)
+            cpu.b = cpu.memory[cpu.pc++];
+            break;
+        case 0x07:  // RLCA (Rotate A left, old bit 7 to Carry flag)
+            cpu.cf = (cpu.a & 0x80) >> 7;
+            cpu.a = (cpu.a << 1) | cpu.cf;
+            cpu.zf = 0;
+            cpu.nf = 0;
+            cpu.hf = 0;
+            break;
+        case 0x08:  // LD (nn), SP (Store SP at address nn)
+            {
+                uint16_t addr = cpu.memory[cpu.pc++] | (cpu.memory[cpu.pc++] << 8);
+                cpu.memory[addr] = cpu.sp & 0xFF;
+                cpu.memory[addr + 1] = (cpu.sp >> 8) & 0xFF;
+            }
+            break;
+        case 0x09:  // ADD HL, BC (Add BC to HL)
+            {
+                uint32_t hl = (cpu.h << 8) | cpu.l;
+                uint32_t bc = (cpu.b << 8) | cpu.c;
+                uint32_t result = hl + bc;
+                cpu.h = (result >> 8) & 0xFF;
+                cpu.l = result & 0xFF;
+                cpu.cf = (result > 0xFFFF);
+                cpu.hf = ((hl & 0xFFF) + (bc & 0xFFF) > 0xFFF);
+                cpu.nf = 0;
+            }
+            break;
+        case 0x0A:  // LD A, (BC) (Load A from address BC)
+            cpu.a = cpu.memory[(cpu.b << 8) | cpu.c];
+            break;
+        case 0x0B:  // DEC BC (Decrement BC)
+            cpu.c--;
+            if (cpu.c == 0xFF) cpu.b--;
+            break;
+        case 0x0C:  // INC C (Increment C)
+            cpu.c++;
+            cpu.zf = (cpu.c == 0);
+            cpu.nf = 0;
+            cpu.hf = ((cpu.c & 0x0F) == 0);
+            break;
+        case 0x0D:  // DEC C (Decrement C)
+            cpu.c--;
+            cpu.zf = (cpu.c == 0);
+            cpu.nf = 1;
+            cpu.hf = ((cpu.c & 0x0F) == 0x0F);
+            break;
+        case 0x0E:  // LD C, n (Load 8-bit immediate into C)
+            cpu.c = cpu.memory[cpu.pc++];
+            break;
+        case 0x0F:  // RRCA (Rotate A right, old bit 0 to Carry flag)
+            cpu.cf = cpu.a & 0x01;
+            cpu.a = (cpu.a >> 1) | (cpu.cf << 7);
+            cpu.zf = 0;
+            cpu.nf = 0;
+            cpu.hf = 0;
+            break;
         // Add more opcodes as needed
         default:
             cerr << "Unhandled opcode: 0x" << hex << (int)opcode << endl;
             break;
     }
 }
+
 
 // Handle interrupts (for demonstration)
 void handle_interrupts(CPU &cpu) {
@@ -351,4 +426,3 @@ int main() {
 
     return 0;
 }
-
